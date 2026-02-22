@@ -6,6 +6,7 @@ import MusicLibrary
 import difflib
 import requests
 import os
+import pywhatkit
 from openai import OpenAI 
 from apikeys import openrouter_api
 from apikeys import news_API
@@ -71,6 +72,7 @@ def processCommand(c):
         webbrowser.open("https://youtube.com")
     elif "open linkedin" in c.lower():
         webbrowser.open("https://linkedin.com")
+
     elif c.lower().startswith("play"):
         song = c.lower().replace("play", "").strip()
         song = song.replace(".", "").strip()
@@ -81,10 +83,11 @@ def processCommand(c):
 
         if matches:
             best_match = matches[0]
-            speak(f"Playing {best_match}")
+            speak(f"Playing {best_match} from library")
             webbrowser.open(MusicLibrary.music[best_match])
         else:
-            speak("Song not found")
+            speak(f"Playing {song} from youtube")
+            pywhatkit.playonyt(song)
 
     elif "news" in c.lower():
         r = requests.get(f"https://newsapi.org/v2/top-headlines?country=us&apiKey={newsAPI}")
