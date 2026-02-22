@@ -6,8 +6,8 @@ FEATURES
 • Converts text to speech using pyttsx3 for local conversion. 
 • Uses gTTS (Google Text-to-Speech) and pygame for playback. 
 • Web Browsing. 
-• Opens websites like Google, Facebook, YouTube, and LinkedIn based on voice 
-commands. 
+• Opens websites like Google, Facebook, YouTube, and LinkedIn based on voice commands
+• Capable of real-time speech recognition, dynamic YouTube music streaming based on voice commands
 • Music Playback 
 • Interfaces with a musicLibrary module to play songs via web links. 
 • News Fetching 
