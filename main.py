@@ -5,7 +5,7 @@ from openai import OpenAI
 from apikeys import openrouter_api, news_API
 import MusicLibrary
 
-# speak() is a no-op on cloud — audio is handled by app.py via gTTS+browser
+# speak() is a no-op — browser handles all audio via Web Speech API
 def speak(text):
     pass
 
@@ -32,19 +32,15 @@ def processCommand(command):
         if "open google" in command:
             webbrowser.open("https://google.com")
             return "Opening Google, sir."
-
         elif "open youtube" in command:
             webbrowser.open("https://youtube.com")
             return "Opening YouTube, sir."
-
         elif "open facebook" in command:
             webbrowser.open("https://facebook.com")
             return "Opening Facebook, sir."
-
         elif "open linkedin" in command:
             webbrowser.open("https://linkedin.com")
             return "Opening LinkedIn, sir."
-
         elif command.startswith("play"):
             song = command.replace("play", "").strip()
             matches = difflib.get_close_matches(song, MusicLibrary.music.keys(), n=1, cutoff=0.5)
@@ -56,7 +52,6 @@ def processCommand(command):
                 query = song.replace(" ", "+")
                 webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
                 return f"Playing {song} on YouTube, sir."
-
         elif "news" in command:
             r = requests.get(
                 f"https://newsapi.org/v2/top-headlines?country=in&apiKey={news_API}",
@@ -67,9 +62,7 @@ def processCommand(command):
                 headlines = [a['title'] for a in articles if a.get('title')][:5]
                 return "Top Headlines:\n\n" + "\n\n".join(f"• {h}" for h in headlines)
             return "Unable to fetch news right now."
-
         else:
             return aiProcess(command)
-
     except Exception as e:
         return f"Command Error: {e}"
