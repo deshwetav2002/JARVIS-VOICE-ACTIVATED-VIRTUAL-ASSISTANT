@@ -7,6 +7,9 @@ from openai import OpenAI
 from apikeys import openrouter_api, news_API
 import MusicLibrary
 
+openrouter_api = st.secrets["OPENROUTER_API"]
+news_API = st.secrets["NEWS_API"]
+
 # speak() runs in its own thread so it NEVER blocks the callback
 def speak(text):
     def _run():
