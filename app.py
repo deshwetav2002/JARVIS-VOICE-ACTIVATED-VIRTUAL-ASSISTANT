@@ -1,6 +1,8 @@
 import streamlit as st
 import base64
 from datetime import datetime
+import speech_recognition as sr
+import io
 
 # ── LAZY IMPORT ───────────────────────────────────────────────────────────────
 def get_process_command():
@@ -11,8 +13,9 @@ def get_process_command():
 st.set_page_config(page_title="JARVIS AI", page_icon="🤖", layout="wide")
 
 # ── SESSION STATE ─────────────────────────────────────────────────────────────
-if "messages"     not in st.session_state: st.session_state.messages     = []
-if "last_command" not in st.session_state: st.session_state.last_command = ""
+if "messages"      not in st.session_state: st.session_state.messages      = []
+if "last_command"  not in st.session_state: st.session_state.last_command  = ""
+if "last_audio_id" not in st.session_state: st.session_state.last_audio_id = None
 
 # ── BACKGROUND IMAGE ──────────────────────────────────────────────────────────
 def get_base64(file_path):
@@ -26,7 +29,6 @@ img = get_base64("background.jpg")
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&display=swap');
-
 .stApp {{
     background-image:
         linear-gradient(rgba(0,0,0,0.75), rgba(0,0,0,0.85)),
@@ -84,11 +86,11 @@ footer {{ visibility: hidden; }}
 }}
 .stButton>button {{
     width: 100%;
-    height: 60px;
-    border-radius: 15px;
+    height: 56px;
+    border-radius: 14px;
     background: linear-gradient(90deg,#00F5FF,#0077FF);
     color: #000;
-    font-size: 18px;
+    font-size: 17px;
     font-weight: bold;
     border: none;
 }}
@@ -97,6 +99,13 @@ footer {{ visibility: hidden; }}
     border: 1px solid rgba(0,245,255,0.4) !important;
     color: white !important;
     border-radius: 10px !important;
+}}
+/* Style the native audio_input widget */
+[data-testid="stAudioInput"] {{
+    background: rgba(0,0,0,0.3);
+    border: 1px solid rgba(0,245,255,0.3);
+    border-radius: 14px;
+    padding: 8px;
 }}
 </style>
 """, unsafe_allow_html=True)
@@ -119,23 +128,22 @@ st.markdown(f"<h2 style='text-align:center;color:white;'>🕒 {current_time}</h2
             unsafe_allow_html=True)
 st.write("")
 
-# ── SPEAK via browser SpeechSynthesis (injected into main page, not iframe) ───
-def speak_js(text):
-    """Inject JS into the main Streamlit page — not inside an iframe."""
-    safe = text.replace("'", "\\'").replace("\n", " ")
+# ── SPEAK via browser SpeechSynthesis ─────────────────────────────────────────
+def speak_browser(text):
+    safe = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
     st.markdown(f"""
     <script>
-    (function() {{
-        window.speechSynthesis.cancel();
         var u = new SpeechSynthesisUtterance('{safe}');
-        u.lang  = 'en-IN';
-        u.rate  = 1.0;
-        u.pitch = 1.0;
-        var vs = window.speechSynthesis.getVoices();
-        var v  = vs.find(x => x.lang === 'en-IN') || vs.find(x => x.lang.startsWith('en'));
-        if (v) u.voice = v;
-        window.speechSynthesis.speak(u);
-    }})();
+        u.lang = 'en-IN';
+        u.rate = 1.0;
+        (function trySpeak() {{
+            var voices = speechSynthesis.getVoices();
+            var v = voices.find(x => x.lang === 'en-IN') ||
+                    voices.find(x => x.lang.startsWith('en'));
+            if (v) u.voice = v;
+            speechSynthesis.cancel();
+            speechSynthesis.speak(u);
+        }})();
     </script>
     """, unsafe_allow_html=True)
 
@@ -153,123 +161,68 @@ def handle_command(text):
     except Exception as e:
         response = f"Error: {e}"
     st.session_state.messages.append(("Jarvis", response))
-    speak_js(response)
+    speak_browser(response)
 
-# ── INPUT ─────────────────────────────────────────────────────────────────────
-# Web Speech API network error happens inside iframes (components.html).
-# Solution: use st.text_input with a voice button that injects JS
-# directly into the MAIN page (not an iframe) via st.markdown <script>.
-# The transcript is written to a hidden text field and submitted.
+# ── VOICE INPUT via st.audio_input (native Streamlit, works on Cloud) ─────────
+# st.audio_input is a native Streamlit widget added in v1.31.
+# It records audio directly in the browser and returns raw WAV bytes.
+# SpeechRecognition then transcribes the bytes server-side via Google API.
+# No iframe sandbox, no component, no pyaudio needed.
+st.markdown("<p style='color:rgba(255,255,255,0.6); text-align:center; font-size:14px;'>"
+            "🎙️ Press the mic below to record, press stop when done</p>",
+            unsafe_allow_html=True)
 
-st.markdown("""
-<script>
-// ── Voice recognition running in main page context (no iframe) ──────────────
-var _recognition = null;
-var _listening   = false;
+audio_bytes = st.audio_input("🎤 Voice Command", label_visibility="collapsed",
+                              key="voice_input")
 
-function jarvisListen() {
-    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-        alert('Please use Chrome or Edge for voice input.');
-        return;
-    }
-    if (_listening) {
-        _recognition.stop();
-        return;
-    }
-    _recognition = new SR();
-    _recognition.lang           = 'en-IN';
-    _recognition.interimResults = false;
-    _recognition.continuous     = false;
+if audio_bytes is not None:
+    # Use id() to detect new recording — only process each recording once
+    audio_id = id(audio_bytes)
+    if audio_id != st.session_state.last_audio_id:
+        st.session_state.last_audio_id = audio_id
+        with st.spinner("🧠 Processing..."):
+            try:
+                recognizer = sr.Recognizer()
+                wav_data = audio_bytes.read()
+                audio_file = io.BytesIO(wav_data)
+                with sr.AudioFile(audio_file) as source:
+                    audio = recognizer.record(source)
+                # en-IN → Indian English, understands Hindi words
+                text = recognizer.recognize_google(audio, language="en-IN")
+                st.success(f"Heard: {text}")
+                handle_command(text)
+                st.rerun()
+            except sr.UnknownValueError:
+                st.warning("Couldn't understand. Please try again.")
+            except sr.RequestError as e:
+                st.error(f"Speech service error: {e}")
+            except Exception as e:
+                st.error(f"Error: {e}")
 
-    _recognition.onstart = function() {
-        _listening = true;
-        var btn = document.getElementById('jarvis-mic-btn');
-        if (btn) {
-            btn.innerText = '🔴 Listening...';
-            btn.style.background = 'linear-gradient(90deg,#ff4466,#cc0033)';
-            btn.style.color = '#fff';
-        }
-    };
+# ── TEXT INPUT ────────────────────────────────────────────────────────────────
+st.markdown("<p style='color:rgba(255,255,255,0.5); text-align:center;"
+            "font-size:13px; margin-top:6px;'>— or type a command —</p>",
+            unsafe_allow_html=True)
 
-    _recognition.onresult = function(e) {
-        var t = e.results[0][0].transcript;
-        // Write into Streamlit's text input and trigger Enter
-        var inputs = window.parent.document.querySelectorAll('input[type=text]');
-        for (var i = 0; i < inputs.length; i++) {
-            if (inputs[i].placeholder && inputs[i].placeholder.includes('Speak')) {
-                var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value').set;
-                nativeInputValueSetter.call(inputs[i], t);
-                inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
-                setTimeout(function() {
-                    inputs[i].dispatchEvent(
-                        new KeyboardEvent('keydown', {key:'Enter', bubbles:true})
-                    );
-                }, 100);
-                break;
-            }
-        }
-    };
-
-    _recognition.onerror = function(e) {
-        console.log('SR error:', e.error);
-        _resetBtn();
-    };
-    _recognition.onend = function() { _resetBtn(); };
-    _recognition.start();
-}
-
-function _resetBtn() {
-    _listening = false;
-    var btn = document.getElementById('jarvis-mic-btn');
-    if (btn) {
-        btn.innerText = '🎤 Click to Speak';
-        btn.style.background = 'linear-gradient(90deg,#00F5FF,#0077FF)';
-        btn.style.color = '#000';
-    }
-}
-
-if (window.speechSynthesis && window.speechSynthesis.onvoiceschanged !== undefined) {
-    window.speechSynthesis.onvoiceschanged = function() {
-        window.speechSynthesis.getVoices();
-    };
-}
-</script>
-
-<div style="display:flex; justify-content:center; margin:10px 0;">
-  <button id="jarvis-mic-btn" onclick="jarvisListen()" style="
-    padding:14px 40px; border-radius:14px;
-    background:linear-gradient(90deg,#00F5FF,#0077FF);
-    color:#000; font-size:18px; font-weight:bold;
-    border:none; cursor:pointer; min-width:260px; transition:all 0.3s;">
-    🎤 Click to Speak
-  </button>
-</div>
-""", unsafe_allow_html=True)
-
-# Text input — voice result gets injected here by JS, or user types manually
 col1, col2 = st.columns([5, 1])
 with col1:
-    user_input = st.text_input(
-        "", placeholder="Speak or type your command here...",
-        label_visibility="collapsed", key="cmd_input"
-    )
+    typed = st.text_input("", placeholder="e.g. open google, play chupke se, latest news",
+                          label_visibility="collapsed", key="typed_cmd")
 with col2:
-    send = st.button("⚡ Send", use_container_width=True)
-
-if (send or user_input) and user_input.strip():
-    handle_command(user_input.strip())
-    st.rerun()
+    if st.button("⚡ Send", use_container_width=True):
+        if typed.strip():
+            handle_command(typed.strip())
+            st.rerun()
 
 # ── CHAT DISPLAY ──────────────────────────────────────────────────────────────
 st.write("")
-for sender, msg in reversed(st.session_state.messages):
-    msg_html = str(msg).replace("\n", "<br>")
-    css  = "chat-box-user"   if sender == "You"    else "chat-box-jarvis"
-    icon = "🧑 You"          if sender == "You"    else "🤖 Jarvis"
-    st.markdown(f"""
-    <div class='{css}'>
-        <b>{icon}:</b> {msg_html}
-    </div>
-    """, unsafe_allow_html=True)
+if st.session_state.messages:
+    for sender, msg in reversed(st.session_state.messages):
+        msg_html = str(msg).replace("\n", "<br>")
+        css  = "chat-box-user"  if sender == "You"  else "chat-box-jarvis"
+        icon = "🧑 You"         if sender == "You"  else "🤖 Jarvis"
+        st.markdown(f"""
+        <div class='{css}'>
+            <b>{icon}:</b> {msg_html}
+        </div>
+        """, unsafe_allow_html=True)
