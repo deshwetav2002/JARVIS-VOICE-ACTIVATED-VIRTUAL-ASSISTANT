@@ -2,24 +2,20 @@ import streamlit as st
 import base64
 from datetime import datetime
 import speech_recognition as sr
-import time
-import threading
+from gtts import gTTS
+import io
+import os
 
 # ── LAZY IMPORT ───────────────────────────────────────────────────────────────
 def get_process_command():
     from main import processCommand
     return processCommand
 
-# ── MODULE-LEVEL THREAD BUFFER ────────────────────────────────────────────────
-_pending = []
-
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="JARVIS AI", page_icon="🤖", layout="wide")
 
 # ── SESSION STATE ─────────────────────────────────────────────────────────────
 if "messages"  not in st.session_state: st.session_state.messages  = []
-if "listening" not in st.session_state: st.session_state.listening = False
-if "stop_fn"   not in st.session_state: st.session_state.stop_fn   = None
 
 # ── BACKGROUND IMAGE ──────────────────────────────────────────────────────────
 def get_base64(file_path):
@@ -106,90 +102,104 @@ st.markdown("<div class='orb'></div>", unsafe_allow_html=True)
 current_time = datetime.now().strftime("%I:%M:%S %p")
 st.markdown(f"<h2 style='text-align:center;color:white;'>🕒 {current_time}</h2>", unsafe_allow_html=True)
 st.write("")
-st.write("")
 
-# ── RECOGNIZER ────────────────────────────────────────────────────────────────
-recognizer = sr.Recognizer()
-recognizer.dynamic_energy_threshold = False
-recognizer.energy_threshold         = 3500
-recognizer.pause_threshold          = 0.8
-recognizer.phrase_threshold         = 0.3
-
-# ── SPEAK IN BACKGROUND THREAD ────────────────────────────────────────────────
-def speak_async(text):
-    def _run():
-        try:
-            import pyttsx3
-            e = pyttsx3.init()
-            e.setProperty('rate', 175)
-            e.say(text)
-            e.runAndWait()
-            e.stop()
-        except Exception as ex:
-            print(f"[SPEAK] Error: {ex}")
-    threading.Thread(target=_run, daemon=True).start()
-
-# ── CALLBACK ──────────────────────────────────────────────────────────────────
-# NO wake word — every phrase heard while listening is treated as a command.
-# The user presses "Start Listening", speaks a command, Jarvis executes it.
-# This is simpler, faster, and actually works with listen_in_background.
-def callback(recognizer_instance, audio):
+# ── gTTS SPEAK — plays audio in browser, Indian English accent ────────────────
+# FIX 1 — double speak: main.py speak() is now a no-op. Only this function
+#          speaks. Previously both main.py speak() AND app.py speak_async()
+#          were firing for every response — that caused the double speech.
+# FIX 2 — Indian accent: gTTS tld="co.in" uses Google India TTS server
+#          which has a natural Indian English accent and correctly pronounces
+#          Hindi song names like "chupke se" instead of mangling them.
+def speak_browser(text):
     try:
-        text = recognizer_instance.recognize_google(audio)
-        text = text.lower().strip()
-        print(f"[MIC] Heard: '{text}'")
-
-        if not text:
-            return
-
-        _pending.append(("You", text))
-
-        try:
-            processCommand = get_process_command()
-            response = processCommand(text)
-            if response:
-                _pending.append(("Jarvis", response))
-                speak_async(response)
-        except Exception as e:
-            print(f"[JARVIS] Command error: {e}")
-            _pending.append(("Jarvis", f"Error: {e}"))
-
-    except sr.UnknownValueError:
-        pass
-    except Exception as e:
-        print(f"[JARVIS] Voice error: {e}")
-
-# ── DRAIN BUFFER → SESSION STATE ──────────────────────────────────────────────
-if _pending:
-    st.session_state.messages.extend(_pending)
-    _pending.clear()
-
-# ── TOGGLE BUTTON ─────────────────────────────────────────────────────────────
-if st.button("🛑 Stop Listening" if st.session_state.listening else "🎤 Start Listening"):
-    if not st.session_state.listening:
-        mic = sr.Microphone()
-        st.session_state.stop_fn = recognizer.listen_in_background(
-            mic, callback, phrase_time_limit=8
+        # tld="co.in" = Indian English accent, handles Hindi words naturally
+        tts = gTTS(text=text, lang="en", tld="co.in", slow=False)
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        buf.seek(0)
+        audio_b64 = base64.b64encode(buf.read()).decode()
+        # Autoplay audio tag injected into the page
+        st.markdown(
+            f'<audio autoplay style="display:none">'
+            f'<source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">'
+            f'</audio>',
+            unsafe_allow_html=True
         )
-        st.session_state.listening = True
-        print("[JARVIS] Started listening")
-        _pending.append(("Jarvis", "Jarvis online. Speak your command."))
-        speak_async("Jarvis online. Speak your command.")
-    else:
-        if st.session_state.stop_fn:
-            st.session_state.stop_fn(wait_for_stop=False)
-            st.session_state.stop_fn = None
-        st.session_state.listening = False
-        print("[JARVIS] Stopped listening")
+    except Exception as e:
+        print(f"[SPEAK] Error: {e}")
+
+# ── HANDLE COMMAND ────────────────────────────────────────────────────────────
+def handle_command(text):
+    text = text.lower().strip()
+    if not text:
+        return
+    st.session_state.messages.append(("You", text))
+    try:
+        processCommand = get_process_command()
+        response = processCommand(text)
+        if response:
+            st.session_state.messages.append(("Jarvis", response))
+            speak_browser(response)
+    except Exception as e:
+        err = f"Error: {e}"
+        st.session_state.messages.append(("Jarvis", err))
+        speak_browser(err)
+
+# ── INPUT: MIC RECORDER (browser-based, works on Streamlit Cloud) ─────────────
+# streamlit-mic-recorder records audio in the browser and returns wav bytes.
+# No pyaudio, no system mic access needed on the server side.
+try:
+    from streamlit_mic_recorder import mic_recorder
+
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        audio = mic_recorder(
+            start_prompt="🎤 Start Listening",
+            stop_prompt="🛑 Stop Listening",
+            just_once=True,         # returns audio once after each recording
+            use_container_width=True,
+            key="mic"
+        )
+
+    with col2:
+        text_input = st.text_input("", placeholder="Or type a command...",
+                                   label_visibility="collapsed")
+        if st.button("⚡ Send", use_container_width=True):
+            if text_input.strip():
+                handle_command(text_input.strip())
+                st.rerun()
+
+    # Process mic audio
+    if audio and audio.get("bytes"):
+        with st.spinner("Processing..."):
+            try:
+                recognizer = sr.Recognizer()
+                wav_bytes = audio["bytes"]
+                audio_data = sr.AudioData(wav_bytes, audio["sample_rate"], 2)
+                # Indian English recognition
+                text = recognizer.recognize_google(audio_data, language="en-IN")
+                handle_command(text)
+                st.rerun()
+            except sr.UnknownValueError:
+                st.warning("Couldn't understand. Please try again.")
+            except Exception as e:
+                st.error(f"Recognition error: {e}")
+
+except ImportError:
+    # Fallback: text input only (if mic recorder not installed)
+    st.warning("Install `streamlit-mic-recorder` for voice input.")
+    text_input = st.text_input("", placeholder="Type a command...",
+                               label_visibility="collapsed")
+    if st.button("⚡ Send", use_container_width=True):
+        if text_input.strip():
+            handle_command(text_input.strip())
+            st.rerun()
 
 # ── STATUS ────────────────────────────────────────────────────────────────────
-if st.session_state.listening:
-    st.success("🟢 Jarvis Active — speak your command")
-else:
-    st.warning("🔴 Jarvis is Offline")
+st.success("🟢 Jarvis Active — press mic to speak")
 
 # ── CHAT DISPLAY ──────────────────────────────────────────────────────────────
-st.write("")
 st.write("")
 for sender, msg in st.session_state.messages:
     msg_html = str(msg).replace("\n", "<br>")
@@ -198,8 +208,3 @@ for sender, msg in st.session_state.messages:
     <b>{sender}:</b> {msg_html}
     </div>
     """, unsafe_allow_html=True)
-
-# ── POLLING LOOP ──────────────────────────────────────────────────────────────
-if st.session_state.listening:
-    time.sleep(1)
-    st.rerun()
