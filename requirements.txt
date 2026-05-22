@@ -1,0 +1,8 @@
+streamlit
+SpeechRecognition
+pyttsx3
+openai
+requests
+pyaudio
+setuptools
+wheel
