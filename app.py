@@ -1,10 +1,8 @@
 import streamlit as st
 import base64
 from datetime import datetime
-import speech_recognition as sr
 from gtts import gTTS
 import io
-import os
 
 # ── LAZY IMPORT ───────────────────────────────────────────────────────────────
 def get_process_command():
@@ -15,7 +13,9 @@ def get_process_command():
 st.set_page_config(page_title="JARVIS AI", page_icon="🤖", layout="wide")
 
 # ── SESSION STATE ─────────────────────────────────────────────────────────────
-if "messages"  not in st.session_state: st.session_state.messages  = []
+if "messages"      not in st.session_state: st.session_state.messages      = []
+if "last_voice"    not in st.session_state: st.session_state.last_voice    = None
+if "last_text_cmd" not in st.session_state: st.session_state.last_text_cmd = None
 
 # ── BACKGROUND IMAGE ──────────────────────────────────────────────────────────
 def get_base64(file_path):
@@ -30,8 +30,8 @@ st.markdown(f"""
 <style>
 .stApp {{
     background-image:
-    linear-gradient(rgba(0,0,0,0.75), rgba(0,0,0,0.85)),
-    url("data:image/jpg;base64,{img}");
+        linear-gradient(rgba(0,0,0,0.75), rgba(0,0,0,0.85)),
+        url("data:image/jpg;base64,{img}");
     background-size: cover;
     background-position: center;
     background-attachment: fixed;
@@ -103,101 +103,72 @@ current_time = datetime.now().strftime("%I:%M:%S %p")
 st.markdown(f"<h2 style='text-align:center;color:white;'>🕒 {current_time}</h2>", unsafe_allow_html=True)
 st.write("")
 
-# ── gTTS SPEAK — plays audio in browser, Indian English accent ────────────────
-# FIX 1 — double speak: main.py speak() is now a no-op. Only this function
-#          speaks. Previously both main.py speak() AND app.py speak_async()
-#          were firing for every response — that caused the double speech.
-# FIX 2 — Indian accent: gTTS tld="co.in" uses Google India TTS server
-#          which has a natural Indian English accent and correctly pronounces
-#          Hindi song names like "chupke se" instead of mangling them.
+# ── SPEAK via gTTS → browser audio (Indian English, handles Hindi words) ──────
 def speak_browser(text):
     try:
-        # tld="co.in" = Indian English accent, handles Hindi words naturally
         tts = gTTS(text=text, lang="en", tld="co.in", slow=False)
         buf = io.BytesIO()
         tts.write_to_fp(buf)
         buf.seek(0)
-        audio_b64 = base64.b64encode(buf.read()).decode()
-        # Autoplay audio tag injected into the page
+        b64 = base64.b64encode(buf.read()).decode()
         st.markdown(
-            f'<audio autoplay style="display:none">'
-            f'<source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">'
-            f'</audio>',
+            f'<audio autoplay><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>',
             unsafe_allow_html=True
         )
     except Exception as e:
-        print(f"[SPEAK] Error: {e}")
+        print(f"[SPEAK] {e}")
 
-# ── HANDLE COMMAND ────────────────────────────────────────────────────────────
+# ── HANDLE COMMAND (single place — no duplicate speak) ────────────────────────
 def handle_command(text):
-    text = text.lower().strip()
+    text = text.strip()
     if not text:
         return
+    print(f"[CMD] {text}")
     st.session_state.messages.append(("You", text))
     try:
-        processCommand = get_process_command()
-        response = processCommand(text)
-        if response:
-            st.session_state.messages.append(("Jarvis", response))
-            speak_browser(response)
+        response = get_process_command()(text)
+        response = response or "Done, sir."
     except Exception as e:
-        err = f"Error: {e}"
-        st.session_state.messages.append(("Jarvis", err))
-        speak_browser(err)
+        response = f"Error: {e}"
+    st.session_state.messages.append(("Jarvis", response))
+    speak_browser(response)   # only called here — main.py speak() is no-op
 
-# ── INPUT: MIC RECORDER (browser-based, works on Streamlit Cloud) ─────────────
-# streamlit-mic-recorder records audio in the browser and returns wav bytes.
-# No pyaudio, no system mic access needed on the server side.
-try:
-    from streamlit_mic_recorder import mic_recorder
+# ── VOICE INPUT using speech_to_text (Web Speech API, runs in browser) ────────
+# speech_to_text uses the browser's built-in Web Speech API — no pyaudio,
+# no server mic needed. Works on Streamlit Cloud.
+# language="en-IN" → Indian English, recognises Hindi words correctly.
+from streamlit_mic_recorder import speech_to_text
 
-    col1, col2 = st.columns([1, 1])
+col1, col2 = st.columns([1, 1])
 
-    with col1:
-        audio = mic_recorder(
-            start_prompt="🎤 Start Listening",
-            stop_prompt="🛑 Stop Listening",
-            just_once=True,         # returns audio once after each recording
-            use_container_width=True,
-            key="mic"
-        )
+with col1:
+    voice_text = speech_to_text(
+        start_prompt="🎤 Start Listening",
+        stop_prompt="🛑 Stop",
+        language="en-IN",          # Indian English — understands Hindi words
+        just_once=True,            # returns text once, resets for next command
+        use_container_width=True,
+        key="stt"
+    )
 
-    with col2:
-        text_input = st.text_input("", placeholder="Or type a command...",
-                                   label_visibility="collapsed")
-        if st.button("⚡ Send", use_container_width=True):
-            if text_input.strip():
-                handle_command(text_input.strip())
-                st.rerun()
+with col2:
+    typed = st.text_input("", placeholder="Or type a command...",
+                          label_visibility="collapsed", key="typed_cmd")
+    send = st.button("⚡ Send", use_container_width=True)
 
-    # Process mic audio
-    if audio and audio.get("bytes"):
-        with st.spinner("Processing..."):
-            try:
-                recognizer = sr.Recognizer()
-                wav_bytes = audio["bytes"]
-                audio_data = sr.AudioData(wav_bytes, audio["sample_rate"], 2)
-                # Indian English recognition
-                text = recognizer.recognize_google(audio_data, language="en-IN")
-                handle_command(text)
-                st.rerun()
-            except sr.UnknownValueError:
-                st.warning("Couldn't understand. Please try again.")
-            except Exception as e:
-                st.error(f"Recognition error: {e}")
+# ── PROCESS VOICE RESULT ──────────────────────────────────────────────────────
+# speech_to_text returns the transcribed string when done.
+# We track last_voice to avoid re-processing the same result on reruns.
+if voice_text and voice_text != st.session_state.last_voice:
+    st.session_state.last_voice = voice_text
+    handle_command(voice_text)
+    st.rerun()
 
-except ImportError:
-    # Fallback: text input only (if mic recorder not installed)
-    st.warning("Install `streamlit-mic-recorder` for voice input.")
-    text_input = st.text_input("", placeholder="Type a command...",
-                               label_visibility="collapsed")
-    if st.button("⚡ Send", use_container_width=True):
-        if text_input.strip():
-            handle_command(text_input.strip())
-            st.rerun()
-
-# ── STATUS ────────────────────────────────────────────────────────────────────
-st.success("🟢 Jarvis Active — press mic to speak")
+# ── PROCESS TEXT INPUT ────────────────────────────────────────────────────────
+if send and typed.strip() and typed.strip() != st.session_state.last_text_cmd:
+    st.session_state.last_text_cmd = typed.strip()
+    handle_command(typed.strip())
+    st.rerun()
 
 # ── CHAT DISPLAY ──────────────────────────────────────────────────────────────
 st.write("")
