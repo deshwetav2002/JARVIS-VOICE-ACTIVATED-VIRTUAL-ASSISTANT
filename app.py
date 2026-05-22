@@ -25,6 +25,8 @@ img = get_base64("background.jpg")
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&display=swap');
+
 .stApp {{
     background-image:
         linear-gradient(rgba(0,0,0,0.75), rgba(0,0,0,0.85)),
@@ -41,6 +43,7 @@ footer {{ visibility: hidden; }}
     font-weight: bold;
     color: #00F5FF;
     text-shadow: 0px 0px 20px cyan;
+    font-family: 'Orbitron', sans-serif;
 }}
 .sub-text {{
     text-align: center;
@@ -79,6 +82,22 @@ footer {{ visibility: hidden; }}
     border: 1px solid rgba(0,245,255,0.2);
     backdrop-filter: blur(10px);
 }}
+.stButton>button {{
+    width: 100%;
+    height: 60px;
+    border-radius: 15px;
+    background: linear-gradient(90deg,#00F5FF,#0077FF);
+    color: #000;
+    font-size: 18px;
+    font-weight: bold;
+    border: none;
+}}
+.stTextInput > div > div > input {{
+    background: rgba(0,0,0,0.5) !important;
+    border: 1px solid rgba(0,245,255,0.4) !important;
+    color: white !important;
+    border-radius: 10px !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -100,11 +119,31 @@ st.markdown(f"<h2 style='text-align:center;color:white;'>🕒 {current_time}</h2
             unsafe_allow_html=True)
 st.write("")
 
+# ── SPEAK via browser SpeechSynthesis (injected into main page, not iframe) ───
+def speak_js(text):
+    """Inject JS into the main Streamlit page — not inside an iframe."""
+    safe = text.replace("'", "\\'").replace("\n", " ")
+    st.markdown(f"""
+    <script>
+    (function() {{
+        window.speechSynthesis.cancel();
+        var u = new SpeechSynthesisUtterance('{safe}');
+        u.lang  = 'en-IN';
+        u.rate  = 1.0;
+        u.pitch = 1.0;
+        var vs = window.speechSynthesis.getVoices();
+        var v  = vs.find(x => x.lang === 'en-IN') || vs.find(x => x.lang.startsWith('en'));
+        if (v) u.voice = v;
+        window.speechSynthesis.speak(u);
+    }})();
+    </script>
+    """, unsafe_allow_html=True)
+
 # ── HANDLE COMMAND ────────────────────────────────────────────────────────────
 def handle_command(text):
     text = text.strip()
     if not text or text == st.session_state.last_command:
-        return None
+        return
     st.session_state.last_command = text
     print(f"[CMD] {text}")
     st.session_state.messages.append(("You", text))
@@ -114,174 +153,123 @@ def handle_command(text):
     except Exception as e:
         response = f"Error: {e}"
     st.session_state.messages.append(("Jarvis", response))
-    return response
+    speak_js(response)
 
-# ── VOICE + SPEAK COMPONENT (pure browser — no Python TTS needed) ─────────────
-# Uses Web Speech API (SpeechRecognition) for listening
-# Uses SpeechSynthesis API for speaking — both built into Chrome/Edge
-# No gTTS, no pyaudio, no system packages required.
-# Flow: click mic → speak → silence detected → auto stops →
-#       transcript sent to Streamlit → response spoken aloud by browser
-import streamlit.components.v1 as components
+# ── INPUT ─────────────────────────────────────────────────────────────────────
+# Web Speech API network error happens inside iframes (components.html).
+# Solution: use st.text_input with a voice button that injects JS
+# directly into the MAIN page (not an iframe) via st.markdown <script>.
+# The transcript is written to a hidden text field and submitted.
 
-voice_html = """
-<div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+st.markdown("""
+<script>
+// ── Voice recognition running in main page context (no iframe) ──────────────
+var _recognition = null;
+var _listening   = false;
 
-  <button id="micBtn" onclick="toggleMic()" style="
+function jarvisListen() {
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+        alert('Please use Chrome or Edge for voice input.');
+        return;
+    }
+    if (_listening) {
+        _recognition.stop();
+        return;
+    }
+    _recognition = new SR();
+    _recognition.lang           = 'en-IN';
+    _recognition.interimResults = false;
+    _recognition.continuous     = false;
+
+    _recognition.onstart = function() {
+        _listening = true;
+        var btn = document.getElementById('jarvis-mic-btn');
+        if (btn) {
+            btn.innerText = '🔴 Listening...';
+            btn.style.background = 'linear-gradient(90deg,#ff4466,#cc0033)';
+            btn.style.color = '#fff';
+        }
+    };
+
+    _recognition.onresult = function(e) {
+        var t = e.results[0][0].transcript;
+        // Write into Streamlit's text input and trigger Enter
+        var inputs = window.parent.document.querySelectorAll('input[type=text]');
+        for (var i = 0; i < inputs.length; i++) {
+            if (inputs[i].placeholder && inputs[i].placeholder.includes('Speak')) {
+                var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value').set;
+                nativeInputValueSetter.call(inputs[i], t);
+                inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
+                setTimeout(function() {
+                    inputs[i].dispatchEvent(
+                        new KeyboardEvent('keydown', {key:'Enter', bubbles:true})
+                    );
+                }, 100);
+                break;
+            }
+        }
+    };
+
+    _recognition.onerror = function(e) {
+        console.log('SR error:', e.error);
+        _resetBtn();
+    };
+    _recognition.onend = function() { _resetBtn(); };
+    _recognition.start();
+}
+
+function _resetBtn() {
+    _listening = false;
+    var btn = document.getElementById('jarvis-mic-btn');
+    if (btn) {
+        btn.innerText = '🎤 Click to Speak';
+        btn.style.background = 'linear-gradient(90deg,#00F5FF,#0077FF)';
+        btn.style.color = '#000';
+    }
+}
+
+if (window.speechSynthesis && window.speechSynthesis.onvoiceschanged !== undefined) {
+    window.speechSynthesis.onvoiceschanged = function() {
+        window.speechSynthesis.getVoices();
+    };
+}
+</script>
+
+<div style="display:flex; justify-content:center; margin:10px 0;">
+  <button id="jarvis-mic-btn" onclick="jarvisListen()" style="
     padding:14px 40px; border-radius:14px;
     background:linear-gradient(90deg,#00F5FF,#0077FF);
     color:#000; font-size:18px; font-weight:bold;
-    border:none; cursor:pointer; min-width:240px;
-    transition: all 0.3s;
-  ">🎤 Start Listening</button>
-
-  <p id="status" style="color:#aad4ff; font-size:14px; margin:0; text-align:center;">
-    Click the button and speak your command
-  </p>
-
+    border:none; cursor:pointer; min-width:260px; transition:all 0.3s;">
+    🎤 Click to Speak
+  </button>
 </div>
+""", unsafe_allow_html=True)
 
-<script>
-var recognition = null;
-var synth = window.speechSynthesis;
-var listening = false;
-
-// ── Speak using browser SpeechSynthesis (Indian English voice) ──────────────
-function speakText(text) {
-    synth.cancel();
-    var utter = new SpeechSynthesisUtterance(text);
-    utter.lang = 'en-IN';   // Indian English accent
-    utter.rate = 1.0;
-    utter.pitch = 1.0;
-
-    // Try to find an Indian English voice, fallback to default
-    var voices = synth.getVoices();
-    var indianVoice = voices.find(v => v.lang === 'en-IN') ||
-                      voices.find(v => v.lang.startsWith('en'));
-    if (indianVoice) utter.voice = indianVoice;
-
-    synth.speak(utter);
-}
-
-// ── Toggle mic on/off ────────────────────────────────────────────────────────
-function toggleMic() {
-    if (listening) {
-        if (recognition) recognition.stop();
-        resetBtn();
-    } else {
-        startMic();
-    }
-}
-
-function startMic() {
-    var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-        document.getElementById('status').innerText =
-            'Not supported. Please use Chrome or Edge.';
-        return;
-    }
-
-    recognition = new SpeechRecognition();
-    recognition.lang            = 'en-IN';  // Indian English
-    recognition.interimResults  = false;    // fire only when speech ends
-    recognition.continuous      = false;    // auto-stop after one utterance
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = function() {
-        listening = true;
-        document.getElementById('micBtn').innerText = '🔴 Listening... (auto-stops)';
-        document.getElementById('micBtn').style.background =
-            'linear-gradient(90deg,#ff4466,#cc0033)';
-        document.getElementById('micBtn').style.color = '#fff';
-        document.getElementById('status').innerText = 'Speak now — stops automatically after silence';
-    };
-
-    recognition.onresult = function(event) {
-        var transcript = event.results[0][0].transcript.toLowerCase().trim();
-        document.getElementById('status').innerText = '✅ Heard: ' + transcript;
-
-        // Immediate audio feedback — "Ok sir" before Streamlit processes
-        speakText('Ok sir');
-
-        // Send transcript to Streamlit
-        window.parent.postMessage(
-            {type: 'streamlit:setComponentValue', value: transcript}, '*'
-        );
-    };
-
-    recognition.onerror = function(event) {
-        document.getElementById('status').innerText =
-            '⚠️ Error: ' + event.error + ' — try again';
-        resetBtn();
-    };
-
-    recognition.onend = function() {
-        resetBtn();
-    };
-
-    recognition.start();
-}
-
-function resetBtn() {
-    listening = false;
-    document.getElementById('micBtn').innerText = '🎤 Start Listening';
-    document.getElementById('micBtn').style.background =
-        'linear-gradient(90deg,#00F5FF,#0077FF)';
-    document.getElementById('micBtn').style.color = '#000';
-}
-
-// Pre-load voices (Chrome loads them async)
-if (synth.onvoiceschanged !== undefined) {
-    synth.onvoiceschanged = function() { synth.getVoices(); };
-}
-</script>
-"""
-
-voice_result = components.html(voice_html, height=110)
-
-# ── PROCESS VOICE RESULT ──────────────────────────────────────────────────────
-if voice_result and isinstance(voice_result, str) and voice_result.strip():
-    response = handle_command(voice_result.strip())
-    if response:
-        # Inject JS to speak the full response after Streamlit rerenders
-        speak_js = f"""
-        <script>
-        setTimeout(function() {{
-            var synth = window.speechSynthesis;
-            synth.cancel();
-            var utter = new SpeechSynthesisUtterance({repr(response)});
-            utter.lang = 'en-IN';
-            utter.rate = 1.0;
-            var voices = synth.getVoices();
-            var v = voices.find(v => v.lang === 'en-IN') ||
-                    voices.find(v => v.lang.startsWith('en'));
-            if (v) utter.voice = v;
-            synth.speak(utter);
-        }}, 300);
-        </script>
-        """
-        st.markdown(speak_js, unsafe_allow_html=True)
-        st.rerun()
-
-# ── TEXT INPUT ────────────────────────────────────────────────────────────────
-col1, col2 = st.columns([4, 1])
+# Text input — voice result gets injected here by JS, or user types manually
+col1, col2 = st.columns([5, 1])
 with col1:
-    typed = st.text_input("", placeholder="Or type a command...",
-                          label_visibility="collapsed", key="typed_cmd")
+    user_input = st.text_input(
+        "", placeholder="Speak or type your command here...",
+        label_visibility="collapsed", key="cmd_input"
+    )
 with col2:
-    if st.button("⚡ Send", use_container_width=True):
-        if typed.strip():
-            handle_command(typed.strip())
-            st.rerun()
+    send = st.button("⚡ Send", use_container_width=True)
+
+if (send or user_input) and user_input.strip():
+    handle_command(user_input.strip())
+    st.rerun()
 
 # ── CHAT DISPLAY ──────────────────────────────────────────────────────────────
 st.write("")
 for sender, msg in reversed(st.session_state.messages):
     msg_html = str(msg).replace("\n", "<br>")
-    css_class = "chat-box-user" if sender == "You" else "chat-box-jarvis"
-    label = "🧑 You" if sender == "You" else "🤖 Jarvis"
+    css  = "chat-box-user"   if sender == "You"    else "chat-box-jarvis"
+    icon = "🧑 You"          if sender == "You"    else "🤖 Jarvis"
     st.markdown(f"""
-    <div class='{css_class}'>
-        <b>{label}:</b> {msg_html}
+    <div class='{css}'>
+        <b>{icon}:</b> {msg_html}
     </div>
     """, unsafe_allow_html=True)
