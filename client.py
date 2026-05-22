@@ -7,7 +7,7 @@ client = OpenAI(
   )
 
 completion = client.chat.completions.create(
-  model="arcee-ai/trinity-large-preview:free",
+  model="nvidia/nemotron-3-super-120b-a12b:free",
   messages=[
     {"role": "system", "content": "You are a virtual assistant named jarvis skilled in general tasks like Alexa and Google Cloud"},
     {"role": "user", "content": "what is coding"}
