@@ -1,13 +1,25 @@
 import webbrowser
 import difflib
 import requests
+import pyttsx3
+import threading
 from openai import OpenAI
 from apikeys import openrouter_api, news_API
 import MusicLibrary
 
-# speak() is a no-op — browser handles all audio via Web Speech API
+# speak() runs in its own thread so it NEVER blocks the callback
 def speak(text):
-    pass
+    def _run():
+        try:
+            eng = pyttsx3.init()
+            eng.setProperty('rate', 175)
+            eng.say(text)
+            eng.runAndWait()
+            eng.stop()
+        except Exception as e:
+            print("Speech Error:", e)
+    threading.Thread(target=_run, daemon=True).start()
+
 
 def aiProcess(command):
     try:
@@ -26,43 +38,59 @@ def aiProcess(command):
     except Exception as e:
         return f"AI Error: {e}"
 
+
 def processCommand(command):
     command = command.lower().strip()
+    response = ""
     try:
         if "open google" in command:
             webbrowser.open("https://google.com")
-            return "Opening Google, sir."
+            response = "Opening Google, sir."
+
         elif "open youtube" in command:
             webbrowser.open("https://youtube.com")
-            return "Opening YouTube, sir."
+            response = "Opening YouTube, sir."
+
         elif "open facebook" in command:
             webbrowser.open("https://facebook.com")
-            return "Opening Facebook, sir."
+            response = "Opening Facebook, sir."
+
         elif "open linkedin" in command:
             webbrowser.open("https://linkedin.com")
-            return "Opening LinkedIn, sir."
+            response = "Opening LinkedIn, sir."
+
         elif command.startswith("play"):
             song = command.replace("play", "").strip()
             matches = difflib.get_close_matches(song, MusicLibrary.music.keys(), n=1, cutoff=0.5)
             if matches:
                 best_match = matches[0]
+                response = f"Playing {best_match}, sir."
                 webbrowser.open(MusicLibrary.music[best_match])
-                return f"Playing {best_match}, sir."
             else:
+                response = f"Playing {song} on YouTube, sir."
+                # Direct YouTube search — faster than pywhatkit
                 query = song.replace(" ", "+")
                 webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
-                return f"Playing {song} on YouTube, sir."
+
         elif "news" in command:
             r = requests.get(
-                f"https://newsapi.org/v2/top-headlines?country=in&apiKey={news_API}",
+                f"https://newsapi.org/v2/top-headlines?country=us&apiKey={news_API}",
                 timeout=6
             )
             if r.status_code == 200:
                 articles = r.json().get('articles', [])
                 headlines = [a['title'] for a in articles if a.get('title')][:5]
-                return "Top Headlines:\n\n" + "\n\n".join(f"• {h}" for h in headlines)
-            return "Unable to fetch news right now."
+                response = "Top Headlines:\n\n" + "\n\n".join(f"• {h}" for h in headlines)
+            else:
+                response = "Unable to fetch news right now."
+
         else:
-            return aiProcess(command)
+            response = aiProcess(command)
+
+        speak(response)
+        return response
+
     except Exception as e:
-        return f"Command Error: {e}"
+        err = f"Command Error: {e}"
+        speak(err)
+        return err
