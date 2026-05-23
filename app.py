@@ -1,33 +1,33 @@
 import streamlit as st
 import base64
 from datetime import datetime
-import speech_recognition as sr
 import time
-import threading
 
 # ── LAZY IMPORT ───────────────────────────────────────────────────────────────
 def get_process_command():
     from main import processCommand
     return processCommand
 
-# ── MODULE-LEVEL THREAD BUFFER ────────────────────────────────────────────────
-_pending = []
-
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="JARVIS AI", page_icon="🤖", layout="wide")
 
 # ── SESSION STATE ─────────────────────────────────────────────────────────────
-if "messages"  not in st.session_state: st.session_state.messages  = []
-if "listening" not in st.session_state: st.session_state.listening = False
-if "stop_fn"   not in st.session_state: st.session_state.stop_fn   = None
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "processing" not in st.session_state:
+    st.session_state.processing = False
 
 # ── BACKGROUND IMAGE ──────────────────────────────────────────────────────────
 def get_base64(file_path):
-    with open(file_path, "rb") as f:
-        data = f.read()
-    return base64.b64encode(data).decode()
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+        return base64.b64encode(data).decode()
+    except FileNotFoundError:
+        return ""
 
 img = get_base64("background.jpg")
+bg_style = f'url("data:image/jpg;base64,{img}")' if img else "none"
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown(f"""
@@ -35,10 +35,11 @@ st.markdown(f"""
 .stApp {{
     background-image:
     linear-gradient(rgba(0,0,0,0.75), rgba(0,0,0,0.85)),
-    url("data:image/jpg;base64,{img}");
+    {bg_style};
     background-size: cover;
     background-position: center;
     background-attachment: fixed;
+    background-color: #0a0a1a;
 }}
 header {{ visibility: hidden; }}
 footer {{ visibility: hidden; }}
@@ -87,6 +88,19 @@ footer {{ visibility: hidden; }}
     font-weight: bold;
     border: none;
 }}
+/* Style the text input */
+.stTextInput > div > div > input {{
+    background: rgba(255,255,255,0.08) !important;
+    border: 1px solid rgba(0,245,255,0.4) !important;
+    border-radius: 15px !important;
+    color: white !important;
+    font-size: 18px !important;
+    padding: 15px 20px !important;
+    caret-color: #00F5FF;
+}}
+.stTextInput > div > div > input::placeholder {{
+    color: rgba(255,255,255,0.4) !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -94,10 +108,19 @@ footer {{ visibility: hidden; }}
 with st.sidebar:
     st.title("🤖 JARVIS")
     st.success("System Online")
-    st.write("✔ Voice Assistant")
+    st.write("✔ Text Command Interface")
     st.write("✔ AI Integrated")
     st.write("✔ Music System")
     st.write("✔ News System")
+    st.divider()
+    st.caption("💡 **Example commands:**")
+    st.caption("• open google")
+    st.caption("• play shape of you")
+    st.caption("• news")
+    st.caption("• what is quantum computing?")
+    if st.button("🗑️ Clear Chat"):
+        st.session_state.messages = []
+        st.rerun()
 
 # ── MAIN UI ───────────────────────────────────────────────────────────────────
 st.markdown("<div class='main-title'>JARVIS</div>", unsafe_allow_html=True)
@@ -108,98 +131,45 @@ st.markdown(f"<h2 style='text-align:center;color:white;'>🕒 {current_time}</h2
 st.write("")
 st.write("")
 
-# ── RECOGNIZER ────────────────────────────────────────────────────────────────
-recognizer = sr.Recognizer()
-recognizer.dynamic_energy_threshold = False
-recognizer.energy_threshold         = 3500
-recognizer.pause_threshold          = 0.8
-recognizer.phrase_threshold         = 0.3
+# ── TEXT INPUT COMMAND BAR ────────────────────────────────────────────────────
+col1, col2 = st.columns([5, 1])
+with col1:
+    user_input = st.text_input(
+        label="command",
+        placeholder="Type your command here… (e.g. 'open google', 'news', 'play song')",
+        label_visibility="collapsed",
+        key="cmd_input"
+    )
+with col2:
+    send_clicked = st.button("⚡ Send")
 
-# ── SPEAK IN BACKGROUND THREAD ────────────────────────────────────────────────
-def speak_async(text):
-    def _run():
-        try:
-            import pyttsx3
-            e = pyttsx3.init()
-            e.setProperty('rate', 175)
-            e.say(text)
-            e.runAndWait()
-            e.stop()
-        except Exception as ex:
-            print(f"[SPEAK] Error: {ex}")
-    threading.Thread(target=_run, daemon=True).start()
-
-# ── CALLBACK ──────────────────────────────────────────────────────────────────
-# NO wake word — every phrase heard while listening is treated as a command.
-# The user presses "Start Listening", speaks a command, Jarvis executes it.
-# This is simpler, faster, and actually works with listen_in_background.
-def callback(recognizer_instance, audio):
-    try:
-        text = recognizer_instance.recognize_google(audio)
-        text = text.lower().strip()
-        print(f"[MIC] Heard: '{text}'")
-
-        if not text:
-            return
-
-        _pending.append(("You", text))
-
+# ── PROCESS COMMAND ───────────────────────────────────────────────────────────
+if (send_clicked or (user_input and user_input != st.session_state.get("_last_cmd", ""))) and user_input.strip():
+    st.session_state["_last_cmd"] = user_input
+    st.session_state.messages.append(("You", user_input.strip()))
+    with st.spinner("Jarvis is thinking..."):
         try:
             processCommand = get_process_command()
-            response = processCommand(text)
-            if response:
-                _pending.append(("Jarvis", response))
-                speak_async(response)
+            response = processCommand(user_input.strip())
+            st.session_state.messages.append(("Jarvis", response or "Command executed."))
         except Exception as e:
-            print(f"[JARVIS] Command error: {e}")
-            _pending.append(("Jarvis", f"Error: {e}"))
-
-    except sr.UnknownValueError:
-        pass
-    except Exception as e:
-        print(f"[JARVIS] Voice error: {e}")
-
-# ── DRAIN BUFFER → SESSION STATE ──────────────────────────────────────────────
-if _pending:
-    st.session_state.messages.extend(_pending)
-    _pending.clear()
-
-# ── TOGGLE BUTTON ─────────────────────────────────────────────────────────────
-if st.button("🛑 Stop Listening" if st.session_state.listening else "🎤 Start Listening"):
-    if not st.session_state.listening:
-        mic = sr.Microphone()
-        st.session_state.stop_fn = recognizer.listen_in_background(
-            mic, callback, phrase_time_limit=8
-        )
-        st.session_state.listening = True
-        print("[JARVIS] Started listening")
-        _pending.append(("Jarvis", "Jarvis online. Speak your command."))
-        speak_async("Jarvis online. Speak your command.")
-    else:
-        if st.session_state.stop_fn:
-            st.session_state.stop_fn(wait_for_stop=False)
-            st.session_state.stop_fn = None
-        st.session_state.listening = False
-        print("[JARVIS] Stopped listening")
+            st.session_state.messages.append(("Jarvis", f"Error: {e}"))
+    st.rerun()
 
 # ── STATUS ────────────────────────────────────────────────────────────────────
-if st.session_state.listening:
-    st.success("🟢 Jarvis Active — speak your command")
-else:
-    st.warning("🔴 Jarvis is Offline")
+st.success("🟢 Jarvis Active — type your command above")
 
 # ── CHAT DISPLAY ──────────────────────────────────────────────────────────────
 st.write("")
 st.write("")
-for sender, msg in st.session_state.messages:
+for sender, msg in reversed(st.session_state.messages):
     msg_html = str(msg).replace("\n", "<br>")
+    icon = "🧑" if sender == "You" else "🤖"
+    align = "right" if sender == "You" else "left"
+    color = "rgba(0,120,255,0.15)" if sender == "You" else "rgba(255,255,255,0.08)"
+    border = "rgba(0,120,255,0.4)" if sender == "You" else "rgba(255,255,255,0.1)"
     st.markdown(f"""
-    <div class='chat-box'>
-    <b>{sender}:</b> {msg_html}
+    <div class='chat-box' style='background:{color};border-color:{border};text-align:{align};'>
+    <b>{icon} {sender}:</b> {msg_html}
     </div>
     """, unsafe_allow_html=True)
-
-# ── POLLING LOOP ──────────────────────────────────────────────────────────────
-if st.session_state.listening:
-    time.sleep(1)
-    st.rerun()
