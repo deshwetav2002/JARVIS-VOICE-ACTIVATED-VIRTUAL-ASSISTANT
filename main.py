@@ -1,15 +1,24 @@
 import webbrowser
 import difflib
 import requests
+import pyttsx3
 import threading
 from openai import OpenAI
 from apikeys import openrouter_api, news_API
 import MusicLibrary
 
-# speak() is a no-op on Streamlit Cloud (no audio output available).
-# On a local machine you can restore pyttsx3 here if desired.
+# speak() runs in its own thread so it NEVER blocks the callback
 def speak(text):
-    print(f"[JARVIS] {text}")
+    def _run():
+        try:
+            eng = pyttsx3.init()
+            eng.setProperty('rate', 175)
+            eng.say(text)
+            eng.runAndWait()
+            eng.stop()
+        except Exception as e:
+            print("Speech Error:", e)
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def aiProcess(command):
@@ -59,6 +68,7 @@ def processCommand(command):
                 webbrowser.open(MusicLibrary.music[best_match])
             else:
                 response = f"Playing {song} on YouTube, sir."
+                # Direct YouTube search — faster than pywhatkit
                 query = song.replace(" ", "+")
                 webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
 
